@@ -1,0 +1,7 @@
+watchdog
+psutil
+schedule
+streamlit
+boto3
+pandas
+python-dotenv

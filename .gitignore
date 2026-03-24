@@ -1,0 +1,6 @@
+.env
+agent.db
+backups/
+__pycache__/
+*.pyc
+temp/
