@@ -1,5 +1,5 @@
 # GuardianX
-# 🚀 GuardianX - Autonomous Backup Decision Agent
+# 🚀 Autonomous Backup Decision Agent
 
 > “From reactive backups to intelligent decision-making — redefining data protection with automation and insight.”
 
