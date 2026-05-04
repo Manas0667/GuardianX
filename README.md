@@ -1,107 +1,177 @@
-# GuardianX
-# 🚀 Autonomous Backup Decision Agent
+# 🛡️ GuardianX — Intelligent Backup & Ransomware Detection System
 
-> “From reactive backups to intelligent decision-making — redefining data protection with automation and insight.”
+## 🚀 Overview
 
----
+GuardianX is an intelligent cloud-based system that continuously monitors system activity, detects anomalies such as ransomware behavior, and automatically triggers secure backups.
 
-## 🧠 Overview
-
-The **Autonomous Backup Decision Agent** is an AI-inspired system that continuously monitors system activity, calculates risk levels, detects anomalies, and automatically decides the most appropriate backup strategy.
-
-Instead of traditional static backups, this system uses a **dynamic, rule-based decision engine** to choose between:
-
-- Full Backup  
-- Differential Backup  
-- Incremental Backup  
-- No Backup (Wait)
-
-It also provides a **real-time interactive dashboard** for monitoring, insights, and simulation.
+It combines **real-time monitoring**, **risk-based decision making**, and **cloud automation (AWS)** to ensure data safety and system resilience.
 
 ---
 
-## 🔥 Key Features
+## 🎯 Key Features
 
-### 🧠 Intelligent Decision Engine
-- Calculates risk score based on:
-  - Disk usage  
-  - CPU & RAM usage  
-  - File activity  
-  - Time since last backup  
-  - Anomalies  
+* 🔍 **Real-Time File Monitoring**
 
----
+  * Detects suspicious file activity using entropy analysis
+  * Identifies ransomware-like behavior instantly
 
-### 🚨 Anomaly Detection System
-Detects suspicious behaviors such as:
-- Mass file deletion  
-- Ransomware-like entropy changes  
-- File extension rename attacks  
+* 🧠 **Risk-Based Decision Engine**
 
----
+  * Calculates dynamic risk score
+  * Triggers:
 
-### 📦 Automated Backup Execution
-Automatically performs:
-- Full Backup  
-- Differential Backup  
-- Incremental Backup  
+    * `WAIT` (safe)
+    * `INCREMENTAL BACKUP`
+    * `EMERGENCY BACKUP`
 
-Supports:
-- Local storage  
-- AWS S3 (optional)
+* ☁️ **Cloud Integration (AWS)**
 
----
+  * **S3** → Backup storage
+  * **RDS (PostgreSQL)** → Logs & history
+  * **Lambda** → Serverless compression
 
-### 📊 Interactive Dashboard (Streamlit)
-- Real-time system monitoring  
-- Risk score visualization  
-- Backup history  
-- Threat logs  
-- AI decision insights  
+* 📦 **Smart Backup System**
 
----
+  * Local + Cloud backup support
+  * Automatic compression
+  * SHA-256 integrity verification
 
-### 🎯 What-If Simulation (Unique Feature)
-Simulate system conditions like:
-- CPU usage  
-- File modifications  
-- Days since last backup  
+* 📊 **Interactive Dashboard**
 
-👉 Predicts:
-- Risk Score  
-- Backup Decision  
-
----
-
-### 🧠 Adaptive Scheduler
-- Learns system activity patterns  
-- Chooses optimal backup timing  
-- Uses CPU usage heatmap  
+  * Live risk score updates
+  * Anomaly detection alerts
+  * Blinking emergency warnings 🚨
 
 ---
 
 ## 🏗️ Architecture
-Frontend (Streamlit Dashboard)
-↓
-Backend (Decision Agent)
-↓
-Monitoring + Watchdog Modules
-↓
-SQLite Database (agent.db)
-↓
-Backup System (Local / AWS S3)
+
+```
+File System Monitoring
+        ↓
+ Anomaly Detection (Entropy)
+        ↓
+ Decision Agent (Risk Score)
+        ↓
+ Backup Executor
+        ↓
+ ┌───────────────┬───────────────┐
+ │ AWS S3        │ RDS Database  │
+ │ (Storage)     │ (Logs/History)│
+ └───────────────┴───────────────┘
+```
 
 ---
 
-## 🛠️ Tech Stack
+## ⚙️ Tech Stack
 
-- **Python**
-- **Streamlit** (Frontend UI)
-- **SQLite** (Database)
-- **psutil** (System Monitoring)
-- **watchdog** (File Monitoring)
-- **schedule** (Task Scheduling)
-- **boto3** (AWS S3 Integration)
-- **pandas**
+* **Backend:** Python (FastAPI)
+* **Frontend:** HTML, CSS, JavaScript
+* **Database:** PostgreSQL (AWS RDS)
+* **Cloud:** AWS (S3, Lambda, EC2)
+* **Monitoring:** Watchdog, System Metrics
+* **Security:** SHA-256 hashing
+
+---
+
+## 📂 Project Structure
+
+```
+GuardianX/
+│
+├── Backend/
+│   ├── decision_agent.py
+│   ├── backup_executor.py
+│   ├── monitor.py
+│   ├── database.py
+│   └── api.py
+│
+├── Frontend/
+│   └── dashboard UI
+│
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## 🧪 How It Works
+
+1. System monitors file changes in real-time
+2. Calculates entropy of files
+3. Detects anomaly patterns (e.g., ransomware)
+4. Updates risk score dynamically
+5. Decision agent triggers backup automatically
+6. Backup stored in S3 + logged in RDS
+
+---
+
+## ▶️ Run Locally
+
+```bash
+# Clone repo
+git clone https://github.com/Manas0667/GuardianX.git
+
+# Go to project
+cd GuardianX
+
+# Create virtual env
+python -m venv venv
+venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run backend
+python Backend/decision_agent.py
+```
+
+---
+
+## 🌐 Deployment
+
+* Backend deployed on **AWS EC2**
+* Storage handled by **S3**
+* Logs stored in **RDS**
+* Optional: Lambda for async processing
+
+---
+
+## 🔐 Security
+
+* Sensitive data handled via `.env`
+* SHA-256 hashing for backup verification
+* No credentials stored in code
+
+---
+
+## 📸 Demo Highlights
+
+* 🚨 Ransomware detection in real-time
+* ⚡ Automatic emergency backup trigger
+* 📊 Live dashboard updates
+* ☁️ Cloud storage integration
+
+---
+
+## 👨‍💻 Author
+
+**Manas Varshney**
+B.Tech CSE | Cloud & DevOps Enthusiast
+
+---
+
+## ⭐ Future Improvements
+
+* Restore backup feature
+* Email/SMS alerts
+* Kubernetes deployment
+* AI-based anomaly prediction
+
+---
+
+## 💡 Note
+
+This project is built for educational and demonstration purposes, showcasing real-world cloud-integrated system design.
 
 ---
