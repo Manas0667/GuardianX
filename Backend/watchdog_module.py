@@ -1,189 +1,336 @@
-# =============================================================
-# watchdog_module.py — Chahat's Module
-# Continuous file monitoring + 5 anomaly detectors
-# =============================================================
+# watchdog_module.py — File System Event Monitor + Anomaly Detector
+# Author: Chahat Jindal (Roll: 2415000464)
+# Detects: file events, ransomware entropy, mass delete, extension mismatch,
+#          write burst, odd-hour activity → RDS anomaly_log + SNS alerts
 
-import os, math, collections, sqlite3, time, logging
-from datetime import datetime
+import os
+import time
+import math
+import threading
+import boto3
+from collections import defaultdict, deque
+from botocore.exceptions import ClientError
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from config import DB, WATCH
 
-start_time  = time.time()
+from config import (
+    AWS_REGION, SNS_TOPIC_ARN,
+    ENTROPY_THRESHOLD, MASS_DELETE_THRESHOLD,
+    EXTENSION_MISMATCH_MAX, WRITE_BURST_MULTIPLIER,
+    ODD_HOUR_FILE_COUNT, HIGH_ENTROPY_WHITELIST,
+    FILE_IMPORTANCE, WATCH_PATH
+)
+from Backend.database import insert_anomaly_log
 
-# live counters
-creates    = 0
-modifies   = 0
-deletes    = 0
-mismatches = 0
-entropy_flags = []
+# ─── SNS Client ──────────────────────────────────────────────────────────────
+_sns = boto3.client('sns', region_name=AWS_REGION)
 
-# file extensions and their importance scores
-IMPORTANCE = {
-    ".db": 10, ".sqlite": 10, ".sql": 9,
-    ".py": 9,  ".js": 8,     ".java": 8,
-    ".docx": 7,".xlsx": 7,   ".pdf": 6,
-    ".txt": 4, ".csv": 4,    ".json": 4,
-    ".jpg": 1, ".png": 1,    ".mp4": 1,
-    ".tmp": 0, ".log": 0
-}
 
-# extensions expected to have high entropy — skip entropy check
-SKIP_ENTROPY = {".zip", ".gz", ".rar", ".7z", ".enc", ".pdf", ".mp4", ".mp3"}
-
-# ── SHANNON ENTROPY ───────────────────────────────────────────
-def shannon_entropy(filepath):
+def _send_sns_alert(anomaly_type: str, details: str):
+    """Send email/SMS alert via SNS when anomaly detected."""
+    if not SNS_TOPIC_ARN:
+        print(f"[SNS] No topic ARN configured — skipping alert for {anomaly_type}")
+        return
     try:
-        with open(filepath, "rb") as f:
-            data = f.read(2048)
-        if not data:
-            return 0
-        freq = collections.Counter(data)
-        total = len(data)
-        return -sum((c / total) * math.log2(c / total) for c in freq.values())
-    except:
-        return 0
-
-# ── LOG ANOMALY TO DATABASE ───────────────────────────────────
-def log_anomaly(atype, details):
-    try:
-        conn = sqlite3.connect(DB)
-        conn.execute(
-            "INSERT INTO anomaly_log(timestamp,type,details) VALUES(?,?,?)",
-            (datetime.now().isoformat(), atype, details)
+        _sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=f'BACKUP AGENT ALERT: {anomaly_type}',
+            Message=(
+                f"Autonomous Backup Agent detected a threat!\n\n"
+                f"Anomaly Type : {anomaly_type}\n"
+                f"Details      : {details}\n"
+                f"Time         : {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"Action       : Emergency snapshot triggered with S3 Object Lock\n"
+                f"Check dashboard: http://localhost:8501"
+            )
         )
-        conn.commit()
-        conn.close()
-    except:
-        pass
-    logging.info(f"[ANOMALY] {atype} — {details}")
+        print(f"[SNS] Alert sent — {anomaly_type}")
+    except ClientError as e:
+        print(f"[SNS] Failed to send alert: {e}")
 
-# ── FILE SYSTEM EVENT HANDLER ─────────────────────────────────
-class AgentHandler(FileSystemEventHandler):
+
+# ─── Shannon Entropy ─────────────────────────────────────────────────────────
+
+def _calculate_entropy(filepath: str) -> float:
+    """Calculate Shannon entropy of a file. Encrypted files score 7.0+."""
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read(65536)   # read first 64KB only for speed
+        if not data:
+            return 0.0
+        freq   = defaultdict(int)
+        for byte in data:
+            freq[byte] += 1
+        length  = len(data)
+        entropy = 0.0
+        for count in freq.values():
+            p = count / length
+            if p > 0:
+                entropy -= p * math.log2(p)
+        return round(entropy, 3)
+    except (PermissionError, FileNotFoundError, OSError):
+        return 0.0
+
+
+def _get_importance(filepath: str) -> int:
+    ext = os.path.splitext(filepath)[1].lower()
+    return FILE_IMPORTANCE.get(ext, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EVENT HANDLER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class BackupWatchdogHandler(FileSystemEventHandler):
+
+    def __init__(self, anomaly_callback=None):
+        super().__init__()
+        self.anomaly_callback     = anomaly_callback   # called when anomaly found
+        self.changed_files        = []                 # all events this cycle
+        self.lock                 = threading.Lock()
+
+        # Counters for anomaly detectors
+        self._delete_times        = deque()            # timestamps of deletes
+        self._rename_times        = deque()            # timestamps of extension mismatches
+        self._write_baseline      = 1.0                # MB/s baseline
+        self._odd_hour_count      = 0
+        self._odd_hour_reset_time = time.time()
+
+    # ── Event Callbacks ───────────────────────────────────────────────────────
 
     def on_created(self, event):
-        global creates
         if event.is_directory:
             return
-        creates += 1
-        logging.info(f"[CREATE] {os.path.basename(event.src_path)}")
+        self._record_change(event.src_path, 'create')
 
     def on_modified(self, event):
-        global modifies
         if event.is_directory:
             return
-        modifies += 1
-        ext = os.path.splitext(event.src_path)[1].lower()
-        logging.info(f"[MODIFY] {os.path.basename(event.src_path)}")
-        # entropy check — skip known high-entropy formats
-        if ext not in SKIP_ENTROPY:
-            e = shannon_entropy(event.src_path)
-            if e > 7.0:
-                log_anomaly("RANSOMWARE_ENTROPY",
-                    f"{event.src_path} entropy={round(e,2)}")
-                entropy_flags.append(event.src_path)
+        self._record_change(event.src_path, 'modify')
+        self._check_entropy(event.src_path)
 
     def on_deleted(self, event):
-        global deletes
         if event.is_directory:
             return
-        deletes += 1
-        logging.info(f"[DELETE] {os.path.basename(event.src_path)}")
-        if deletes > 20:
-            elapsed = time.time() - start_time
-            if elapsed < 60:
-                log_anomaly("MASS_DELETION",
-                    f"{deletes} files deleted in {round(elapsed)}s")
+        self._record_change(event.src_path, 'delete')
+        self._check_mass_deletion()
 
     def on_moved(self, event):
-        global mismatches
         if event.is_directory:
             return
-        old_ext = os.path.splitext(event.src_path)[1].lower()
-        new_ext = os.path.splitext(event.dest_path)[1].lower()
-        logging.info(f"[RENAME] {os.path.basename(event.src_path)} -> {os.path.basename(event.dest_path)}")
-        if old_ext != new_ext:
-            mismatches += 1
-            if mismatches > 10:
-                log_anomaly("RENAME_ATTACK",
-                    f"{mismatches} extension mismatches detected")
+        self._record_change(event.dest_path, 'rename')
+        self._check_extension_mismatch(event.src_path, event.dest_path)
 
-# ── START WATCHDOG ────────────────────────────────────────────
+    # ── Change Recorder ───────────────────────────────────────────────────────
+
+    def _record_change(self, filepath: str, event_type: str):
+        importance = _get_importance(filepath)
+        if importance == 0:   # skip .tmp, .log
+            return
+        with self.lock:
+            self.changed_files.append({
+                'path'      : filepath,
+                'event'     : event_type,
+                'importance': importance,
+                'time'      : time.time()
+            })
+        # Odd-hour check
+        self._check_odd_hour_activity()
+
+    def get_and_reset_changes(self):
+        """Called by decision_agent every 60s to get changed files list."""
+        with self.lock:
+            files = list(self.changed_files)
+            self.changed_files = []
+        return files
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANOMALY DETECTOR 1 — Ransomware Entropy
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _check_entropy(self, filepath: str):
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in HIGH_ENTROPY_WHITELIST:
+            return   # skip .zip .gz .rar etc — high entropy by nature
+
+        entropy = _calculate_entropy(filepath)
+        if entropy >= ENTROPY_THRESHOLD:
+            details = f"Entropy={entropy} on {os.path.basename(filepath)}"
+            print(f"[ANOMALY] RANSOMWARE_ENTROPY — {details}")
+
+            insert_anomaly_log(
+                anomaly_type ='RANSOMWARE_ENTROPY',
+                details      = details,
+                filepath     = filepath,
+                entropy_score= entropy,
+                severity     ='CRITICAL'
+            )
+            _send_sns_alert('RANSOMWARE_ENTROPY', details)
+
+            if self.anomaly_callback:
+                self.anomaly_callback('RANSOMWARE_ENTROPY', entropy)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANOMALY DETECTOR 2 — Mass Deletion
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _check_mass_deletion(self):
+        now = time.time()
+        self._delete_times.append(now)
+        # Remove timestamps older than 60 seconds
+        while self._delete_times and (now - self._delete_times[0]) > 60:
+            self._delete_times.popleft()
+
+        count = len(self._delete_times)
+        if count >= MASS_DELETE_THRESHOLD:
+            details = f"{count} files deleted in 60 seconds"
+            print(f"[ANOMALY] MASS_DELETION — {details}")
+
+            insert_anomaly_log(
+                anomaly_type='MASS_DELETION',
+                details     = details,
+                severity    ='CRITICAL'
+            )
+            _send_sns_alert('MASS_DELETION', details)
+            self._delete_times.clear()   # reset counter after alert
+
+            if self.anomaly_callback:
+                self.anomaly_callback('MASS_DELETION', count)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANOMALY DETECTOR 3 — Extension Mismatch (ransomware renaming files)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _check_extension_mismatch(self, src: str, dst: str):
+        src_ext = os.path.splitext(src)[1].lower()
+        dst_ext = os.path.splitext(dst)[1].lower()
+
+        if src_ext == dst_ext:
+            return   # normal rename — no extension change
+
+        now = time.time()
+        self._rename_times.append(now)
+        while self._rename_times and (now - self._rename_times[0]) > 30:
+            self._rename_times.popleft()
+
+        count = len(self._rename_times)
+        if count >= EXTENSION_MISMATCH_MAX:
+            details = f"{count} files renamed with different extension in 30s ({src_ext}→{dst_ext})"
+            print(f"[ANOMALY] EXTENSION_MISMATCH — {details}")
+
+            insert_anomaly_log(
+                anomaly_type='EXTENSION_MISMATCH',
+                details     = details,
+                severity    ='HIGH'
+            )
+            _send_sns_alert('EXTENSION_MISMATCH', details)
+            self._rename_times.clear()
+
+            if self.anomaly_callback:
+                self.anomaly_callback('EXTENSION_MISMATCH', count)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANOMALY DETECTOR 4 — Write Burst (handled in decision_agent using psutil)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def check_write_burst(self, current_speed_mbps: float):
+        """Called by decision_agent with current disk write speed."""
+        if self._write_baseline < 0.1:
+            self._write_baseline = max(current_speed_mbps, 0.1)
+            return
+
+        ratio = current_speed_mbps / self._write_baseline
+        if ratio >= WRITE_BURST_MULTIPLIER:
+            details = (f"Write speed {current_speed_mbps:.1f}MB/s is "
+                       f"{ratio:.1f}x above baseline {self._write_baseline:.1f}MB/s")
+            print(f"[ANOMALY] WRITE_BURST — {details}")
+
+            insert_anomaly_log(
+                anomaly_type='WRITE_BURST',
+                details     = details,
+                severity    ='HIGH'
+            )
+            _send_sns_alert('WRITE_BURST', details)
+
+            if self.anomaly_callback:
+                self.anomaly_callback('WRITE_BURST', ratio)
+
+        # Update rolling baseline (slow exponential average)
+        self._write_baseline = 0.9 * self._write_baseline + 0.1 * current_speed_mbps
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANOMALY DETECTOR 5 — Odd-Hour Activity
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _check_odd_hour_activity(self):
+        import datetime
+        hour = datetime.datetime.now().hour
+        if not (0 <= hour < 6):    # only midnight to 6am
+            self._odd_hour_count = 0
+            return
+
+        now = time.time()
+        # Reset counter every hour
+        if now - self._odd_hour_reset_time > 3600:
+            self._odd_hour_count     = 0
+            self._odd_hour_reset_time = now
+
+        self._odd_hour_count += 1
+
+        if self._odd_hour_count >= ODD_HOUR_FILE_COUNT:
+            details = f"{self._odd_hour_count} files changed at {hour:02d}:xx (odd hour)"
+            print(f"[ANOMALY] ODD_HOUR_ACTIVITY — {details}")
+
+            insert_anomaly_log(
+                anomaly_type='ODD_HOUR_ACTIVITY',
+                details     = details,
+                severity    ='MEDIUM'
+            )
+            self._odd_hour_count = 0   # reset
+
+            if self.anomaly_callback:
+                self.anomaly_callback('ODD_HOUR_ACTIVITY', 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# START / STOP API
+# ═══════════════════════════════════════════════════════════════════════════════
+
 _observer = None
+_handler  = None
 
-def start_watchdog(folder=WATCH):
-    global _observer, start_time
-    start_time = time.time()
-    os.makedirs(folder, exist_ok=True)
+def start_watchdog(watch_path: str = WATCH_PATH, anomaly_callback=None):
+    """
+    Start the file system watcher.
+    Returns the handler so decision_agent can poll changed_files.
+    """
+    global _observer, _handler
+    _handler  = BackupWatchdogHandler(anomaly_callback=anomaly_callback)
     _observer = Observer()
-    _observer.schedule(AgentHandler(), folder, recursive=True)
+    _observer.schedule(_handler, path=watch_path, recursive=True)
     _observer.start()
-    logging.info(f"[WATCHDOG] Listening on {folder}")
-    return _observer
+    print(f"[WATCHDOG] Monitoring: {os.path.abspath(watch_path)}")
+    return _handler
 
 def stop_watchdog():
     global _observer
     if _observer:
         _observer.stop()
         _observer.join()
+        print("[WATCHDOG] Stopped.")
 
-# ── GET FILE ACTIVITY ─────────────────────────────────────────
-def get_file_activity():
-    elapsed = max(1, time.time() - start_time)
-    total   = creates + modifies + deletes
-    velocity = round(total / elapsed * 60, 2)
-    return {
-        "created"  : creates,
-        "modified" : modifies,
-        "deleted"  : deletes,
-        "total"    : total,
-        "velocity" : velocity
-    }
 
-# ── CHECK ALL ANOMALIES ───────────────────────────────────────
-def check_anomalies():
-    flags   = []
-    elapsed = time.time() - start_time
-    if deletes > 20 and elapsed < 60:
-        flags.append("MASS_DELETION")
-    if len(entropy_flags) > 0:
-        flags.append("RANSOMWARE_ENTROPY")
-    if mismatches > 10:
-        flags.append("RENAME_ATTACK")
-    return flags
+if __name__ == '__main__':
+    def demo_callback(anomaly_type, value):
+        print(f"  CALLBACK RECEIVED: {anomaly_type} = {value}")
 
-# ── FILE IMPORTANCE SCORE ─────────────────────────────────────
-def get_importance_score(folder=WATCH):
-    score = 0
-    count = 0
-    try:
-        for root, dirs, files in os.walk(folder):
-            for f in files:
-                ext    = os.path.splitext(f)[1].lower()
-                score += IMPORTANCE.get(ext, 2)
-                count += 1
-    except:
-        pass
-    if count == 0:
-        return 50
-    return min(100, round((score / (count * 10)) * 100))
-
-# ── TEST ──────────────────────────────────────────────────────
-if __name__ == "__main__":
-    logging.info("\n=== WATCHDOG MODULE TEST ===\n")
-    logging.info("[IMPORTANCE] Score:", get_importance_score())
-    logging.info("[ANOMALIES]  Active flags:", check_anomalies())
-    logging.info("[ACTIVITY]   Current:", get_file_activity())
-
-    obs = start_watchdog("./test_files")
-    logging.info("\nCreate, modify, or delete files in test_files/ folder")
-    logging.info("Press Ctrl+C to stop\n")
+    handler = start_watchdog('.', anomaly_callback=demo_callback)
+    print("Watching current folder. Press Ctrl+C to stop.")
     try:
         while True:
-            time.sleep(1)
-            fa = get_file_activity()
-            if fa["total"] > 0:
-                logging.info(f"[LIVE] C:{fa['created']} M:{fa['modified']} D:{fa['deleted']} V:{fa['velocity']}/min")
+            time.sleep(5)
+            changes = handler.get_and_reset_changes()
+            if changes:
+                print(f"[TEST] {len(changes)} file events recorded")
     except KeyboardInterrupt:
         stop_watchdog()
-        logging.info("\n[OK] watchdog_module.py is working correctly!")

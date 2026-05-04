@@ -1,0 +1,11 @@
+2026-04-21 00:18:22 | INFO | guardianx | [monitor] Monitor started — interval 60s | Mode: local+RDS+CW(secondary)
+2026-04-21 00:23:26 | ERROR | guardianx | [monitor] RDS write failed: column "machine_id" of relation "activity_log" does not exist
+LINE 1: ...t,ram_pct,disk_pct,free_gb,write_speed,open_files,machine_id...
+                                                             ^
+
+2026-04-21 00:23:26 | ERROR | guardianx | [monitor] RDS write failed: column "machine_id" of relation "activity_log" does not exist
+LINE 1: ...t,ram_pct,disk_pct,free_gb,write_speed,open_files,machine_id...
+                                                             ^
+
+2026-04-21 00:23:27 | INFO | guardianx | [monitor] CPU:10.4% RAM:86.6% Disk:74.8% OpenFiles:1959 Write:0.205MB/s ActivePy:2
+2026-04-21 00:23:27 | INFO | guardianx | [monitor] CPU:9.2% RAM:86.7% Disk:74.8% OpenFiles:1959 Write:0.0MB/s ActivePy:2
